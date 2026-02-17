@@ -127,6 +127,14 @@ save state when exiting Emacs."
   :group 'perspective-mode
   :type 'file)
 
+(defcustom persp-state-load-lazy t
+  "When non-nil, defer opening buffers restored by `persp-state-load'.
+
+With lazy load enabled, Perspective restores each perspective's file
+and dired buffers only when that perspective is first activated."
+  :group 'perspective-mode
+  :type 'boolean)
+
 (defcustom persp-suppress-no-prefix-key-warning nil
   "When non-nil, do not warn the user about `persp-mode-prefix-key' not being set."
   :group 'perspective-mode
@@ -821,12 +829,18 @@ If NORECORD is non-nil, do not update the
   (interactive "i")
   (unless (persp-valid-name-p name)
     (setq name (persp-prompt (and (persp-last) (persp-name (persp-last))))))
-  (if (and (persp-curr) (equal name (persp-current-name))) name
+  (if (and (persp-curr) (equal name (persp-current-name)))
+      (progn
+        (when persp-state-load-lazy
+          (persp--state-maybe-load-current-persp))
+        name)
     (let ((persp (persp-new name)))
       (set-frame-parameter nil 'persp--last (persp-curr))
       (unless norecord
         (run-hooks 'persp-before-switch-hook))
       (persp-activate persp)
+      (when persp-state-load-lazy
+        (persp--state-maybe-load-current-persp))
       (when (fboundp 'persp--set-xref-marker-ring) (persp--set-xref-marker-ring))
       (unless norecord
         (setf (persp-last-switch-time persp) (current-time))
@@ -1512,6 +1526,7 @@ named collections of buffers and window configurations."
     ;; surprising global side effects while keeping re-enable behavior correct.
     (setq read-buffer-function nil)
     (set-frame-parameter nil 'persp--hash nil)
+    (set-frame-parameter nil 'persp--state-lazy-pending nil)
     (setq global-mode-string (delete '(:eval (persp-mode-line)) global-mode-string))
     (let ((default-header-line-format (default-value 'header-line-format)))
       (set-default 'header-line-format (delete '(:eval (persp-mode-line)) default-header-line-format))
@@ -1525,10 +1540,12 @@ By default, this uses the current frame."
   (with-selected-frame frame
     (modify-frame-parameters
      frame
-     '((persp--hash) (persp--curr) (persp--last) (persp--recursive) (persp--modestring)))
+     '((persp--hash) (persp--curr) (persp--last) (persp--recursive)
+       (persp--modestring) (persp--state-lazy-pending)))
     ;; Don't set these variables in modify-frame-parameters
     ;; because that won't do anything if they've already been accessed
     (set-frame-parameter frame 'persp--hash (make-hash-table :test 'equal :size 10))
+    (set-frame-parameter frame 'persp--state-lazy-pending (make-hash-table :test 'equal))
     (when persp-show-modestring
       (if (eq persp-show-modestring 'header)
           (let ((val (or (default-value 'header-line-format) '(""))))
@@ -1942,11 +1959,19 @@ PERSP-SET-IDO-BUFFERS)."
 ;;   ]
 ;; }
 
+(defconst persp--state-format-version 3
+  "Supported on-disk format version for Perspective state files.")
+
+(defvar persp--state-loading-in-progress nil
+  "Non-nil while `persp-state-load' is creating perspectives.")
+
 (cl-defstruct persp--state-complete
+  format-version
   files
   frames)
 
-;; Keep around old version to maintain backwards compatibility.
+;; Keep around old version so old state files can still be parsed and rejected
+;; with a targeted error message.
 (cl-defstruct persp--state-frame
   persps
   order)
@@ -1956,27 +1981,37 @@ PERSP-SET-IDO-BUFFERS)."
   order
   merge-list)
 
+(cl-defstruct persp--state-buffer-entry
+  name
+  kind
+  path)
+
 (cl-defstruct persp--state-single
   buffers
+  buffer-entries
   windows)
 
-(defun persp--state-complete-v2 (state-complete)
-  "Apply this function to persp--state-complete structs to be guaranteed a
-persp--state-complete that is compatible with merge-list saving. Useful for
-maintaining backwards compatibility."
-  (let* ((state-frames (persp--state-complete-frames state-complete))
-         (state-frames-v2
-          (mapcar (lambda (state-frame)
-                    (if (persp--state-frame-v2-p state-frame)
-                        state-frame
-                      (make-persp--state-frame-v2
-                       :persps (persp--state-frame-persps state-frame)
-                       :order (persp--state-frame-order state-frame)
-                       :merge-list nil)))
-                  state-frames)))
-    (make-persp--state-complete
-     :files (persp--state-complete-files state-complete)
-     :frames state-frames-v2)))
+(defun persp--state-read-file (file)
+  "Read perspective state from FILE and validate format support."
+  (let ((state-complete (read
+                         (with-temp-buffer
+                           (insert-file-contents file)
+                           (buffer-string))))
+        version)
+    (unless (persp--state-complete-p state-complete)
+      (user-error "Invalid perspective state file: %s" file))
+    (setq version (persp--state-complete-format-version state-complete))
+    (unless (and (integerp version)
+                 (= persp--state-format-version version))
+      (user-error
+       (concat
+        "Unsupported perspective state format in %s. "
+        "Please recreate this state file using your current Perspective version.")
+       file))
+    (unless (cl-every #'persp--state-frame-v2-p
+                      (persp--state-complete-frames state-complete))
+      (user-error "Unsupported frame payload in perspective state file: %s" file))
+    state-complete))
 
 (defun persp--state-interesting-buffer-p (buffer)
   (and (buffer-name buffer)
@@ -1990,6 +2025,15 @@ maintaining backwards compatibility."
         collect (or (buffer-file-name buffer)
                     (with-current-buffer buffer ; dired special case
                       default-directory))))
+
+(defun persp--state-make-buffer-entry (buffer)
+  "Return a serializable state entry for BUFFER, or nil."
+  (when (persp--state-interesting-buffer-p buffer)
+    (make-persp--state-buffer-entry
+     :name (buffer-name buffer)
+     :kind (if (buffer-file-name buffer) 'file 'dired)
+     :path (or (buffer-file-name buffer)
+               (with-current-buffer buffer default-directory)))))
 
 (defun persp--state-window-state-massage (entry persp valid-buffers)
   "This is a primitive code walker. It removes references to
@@ -2053,22 +2097,62 @@ to the perspective's *scratch* buffer."
                        (cl-loop for persp in persp-names-in-order do
                                 (unless (persp-killed-p (gethash persp (perspectives-hash)))
                                   (with-perspective persp
-                                    (let* ((buffers
+                                    (let* ((buffer-entries
                                             (cl-loop for buffer in (persp-current-buffers)
-                                                     if (persp--state-interesting-buffer-p buffer)
-                                                     collect (buffer-name buffer)))
+                                                     for entry = (persp--state-make-buffer-entry buffer)
+                                                     if entry collect entry))
+                                           (buffers (mapcar #'persp--state-buffer-entry-name
+                                                            buffer-entries))
                                            (windows
                                             (cl-loop for entry in (window-state-get (frame-root-window) t)
                                                      collect (persp--state-window-state-massage entry persp buffers))))
                                       (puthash persp
                                                (make-persp--state-single
                                                 :buffers buffers
+                                                :buffer-entries buffer-entries
                                                 :windows windows)
                                                persps-in-frame)))))
                        (make-persp--state-frame-v2
                         :persps persps-in-frame
                         :order persp-names-in-order
                         :merge-list (frame-parameter nil 'persp-merge-list))))))
+
+(defun persp--state-lazy-pending-table (&optional frame)
+  "Return pending lazy-load state hash for FRAME."
+  (or (frame-parameter frame 'persp--state-lazy-pending)
+      (let ((table (make-hash-table :test 'equal)))
+        (set-frame-parameter frame 'persp--state-lazy-pending table)
+        table)))
+
+(defun persp--state-open-buffer-entry (entry)
+  "Open state ENTRY and return its buffer, or nil."
+  (let ((path (persp--state-buffer-entry-path entry))
+        (kind (persp--state-buffer-entry-kind entry)))
+    (when (and (stringp path) (file-exists-p path))
+      (condition-case nil
+          (pcase kind
+            ('dired (dired-noselect path))
+            (_ (find-file-noselect path)))
+        (error nil)))))
+
+(defun persp--state-maybe-load-current-persp ()
+  "Load deferred state for the current perspective, if any."
+  (unless persp--state-loading-in-progress
+    (let* ((pending (frame-parameter nil 'persp--state-lazy-pending))
+           (persp-name (and pending (persp-current-name)))
+           (state-single (and persp-name (gethash persp-name pending))))
+      (when state-single
+        (dolist (entry (persp--state-single-buffer-entries state-single))
+          (let ((buffer (persp--state-open-buffer-entry entry)))
+            (when (buffer-live-p buffer)
+              (persp-add-buffer buffer))))
+        ;; XXX: split-window-horizontally is necessary for window-state-put to
+        ;; succeed? Something goes haywire with root windows without it.
+        (split-window-horizontally)
+        (window-state-put (persp--state-single-windows state-single)
+                          (frame-root-window)
+                          'safe)
+        (remhash persp-name pending)))))
 
 (defun persp-purge-exception-p (buffer)
   (if (buffer-live-p buffer)
@@ -2139,6 +2223,7 @@ visible in a perspective as windows, they will be saved as
     ;; actually save
     (persp-save)
     (let ((state-complete (make-persp--state-complete
+                           :format-version persp--state-format-version
                            :files (persp--state-file-data)
                            :frames (persp--state-frame-data))))
       ;; create or overwrite target-file:
@@ -2155,7 +2240,10 @@ set.
 
 Frames are restored, along with each frame's perspective list and merge list.
 Each perspective's buffer list and window layout are also
-restored."
+restored.
+
+Perspective's modern state format restores file and dired buffers lazily:
+they are opened the first time each perspective is activated."
   (interactive (list
                 (read-file-name "Restore perspective state from file: "
                                 persp-state-default-file
@@ -2166,19 +2254,9 @@ restored."
   ;; before hook
   (run-hooks 'persp-state-before-load-hook)
   ;; actually load
-  (let ((tmp-persp-name (format "%04x%04x" (random (expt 16 4)) (random (expt 16 4))))
-        (frame-count 0)
-        (state-complete (persp--state-complete-v2
-                         (read
-                          (with-temp-buffer
-                            (insert-file-contents file)
-                            (buffer-string))))))
-    ;; open all files in a temporary perspective to avoid polluting "main"
-    (persp-switch tmp-persp-name)
-    (cl-loop for file in (persp--state-complete-files state-complete) do
-             (when (file-exists-p file)
-               (find-file file)))
-    ;; iterate over the frames
+  (let ((frame-count 0)
+        (state-complete (persp--state-read-file file))
+        (persp--state-loading-in-progress persp-state-load-lazy))
     (cl-loop for frame in (persp--state-complete-frames state-complete) do
              (cl-incf frame-count)
              (let ((emacs-frame (if (> frame-count 1) (make-frame-command) (selected-frame)))
@@ -2186,24 +2264,27 @@ restored."
                    (frame-persp-order (reverse (persp--state-frame-v2-order frame)))
                    (frame-persp-merge-list (persp--state-frame-v2-merge-list frame)))
                (with-selected-frame emacs-frame
-                 ;; restore the merge list
                  (set-frame-parameter emacs-frame 'persp-merge-list frame-persp-merge-list)
-                 ;; iterate over the perspectives in the frame in the appropriate order
+                 (set-frame-parameter emacs-frame 'persp--state-lazy-pending
+                                      (make-hash-table :test 'equal))
                  (cl-loop for persp in frame-persp-order do
                           (let ((state-single (gethash persp frame-persp-table)))
                             (persp-switch persp)
                             (set-frame-parameter nil 'persp-merge-list frame-persp-merge-list)
-                            (cl-loop for buffer in (persp--state-single-buffers state-single) do
-                                     (persp-add-buffer buffer))
-                            ;; XXX: split-window-horizontally is necessary for
-                            ;; window-state-put to succeed? Something goes haywire with root
-                            ;; windows without it.
-                            (split-window-horizontally)
-                            (window-state-put (persp--state-single-windows state-single)
-                                              (frame-root-window emacs-frame)
-                                              'safe))))))
-    ;; cleanup
-    (persp-kill tmp-persp-name))
+                            (when state-single
+                              (if persp-state-load-lazy
+                                  (puthash persp state-single (persp--state-lazy-pending-table))
+                                (dolist (entry (persp--state-single-buffer-entries state-single))
+                                  (let ((buffer (persp--state-open-buffer-entry entry)))
+                                    (when (buffer-live-p buffer)
+                                      (persp-add-buffer buffer))))
+                                ;; XXX: split-window-horizontally is necessary for
+                                ;; window-state-put to succeed? Something goes haywire with root
+                                ;; windows without it.
+                                (split-window-horizontally)
+                                (window-state-put (persp--state-single-windows state-single)
+                                                  (frame-root-window emacs-frame)
+                                                  'safe)))))))))
   ;; after hook
   (run-hooks 'persp-state-after-load-hook))
 

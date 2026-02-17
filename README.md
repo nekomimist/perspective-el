@@ -23,6 +23,9 @@ At long last this project has a
 [changelog](https://github.com/nex3/perspective-el/blob/master/CHANGELOG.md);
 please refer to it for release notes.
 
+For a contributor-focused overview of internal design, see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 <!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
 - [Sample Use Cases](#sample-use-cases)
     - [Multiple Projects](#multiple-projects)
@@ -404,6 +407,14 @@ to use the replacements:
 A pair of functions, `persp-state-save` and `persp-state-load`, implement
 perspective durability on disk. When called interactively, they prompt for files
 to save sessions to and restore from.
+
+By default, `persp-state-load` restores file-visiting and `dired` buffers
+lazily: buffers for a perspective are opened when that perspective is first
+activated. This keeps load times reasonable when state files contain many
+buffers across many perspectives.
+
+State files are versioned. Loading unsupported legacy formats now raises an
+error; resave the session with a current Perspective version to migrate.
 
 A custom variable, `persp-state-default-file`, sets a default file to use for
 saving and restoring perspectives. When it is set, `persp-state-save` may be

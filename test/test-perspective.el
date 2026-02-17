@@ -2388,9 +2388,19 @@ persp-test-make-sample-environment."
         (should (equal (list "main") (sort (persp-names) #'string-lessp)))
         ;; load it back up
         (persp-state-load "state-1.el")
-        (should (= 7 (length (persp-test-buffer-list-all)))) ; sanity check again
+        ;; Buffers are loaded lazily per perspective on first activation.
+        (should (= 0 (length (persp-test-buffer-list-all))))
+        ;; Switch into perspectives and verify full restoration.
         (persp-test-check-sample-environment))
     (persp-test-clean-files "A1" "A2" "A3" "B1" "B2" "B3" "B4" "state-1.el")))
+
+(ert-deftest state-load-legacy-format-errors ()
+  (unwind-protect
+      (persp-test-with-persp
+        (with-temp-file "state-legacy.el"
+          (insert "#s(persp--state-complete nil nil)"))
+        (should-error (persp-state-load "state-legacy.el")))
+    (persp-test-clean-files "state-legacy.el")))
 
 (ert-deftest merge-and-unmerge ()
   (let ((persp-merge-list nil))

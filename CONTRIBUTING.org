@@ -34,6 +34,11 @@ git push --force-with-lease origin nekomimist
 If ~nekomimist~ ever becomes a shared branch, prefer merging ~master~ into it
 instead of rebasing published history.
 
+** Review architecture notes
+
+Before changing behavior in switching, persistence, frame-local state, or merge
+logic, review ~docs/ARCHITECTURE.md~.
+
 
 ** Run automated tests
 
