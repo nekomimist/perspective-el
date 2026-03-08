@@ -1211,6 +1211,8 @@ Killing a perspective means that all buffers associated with that
 perspective and no others are killed."
   (interactive "i")
   (if (null name) (setq name (persp-prompt (persp-current-name) t)))
+  (unless (gethash name (perspectives-hash))
+    (persp-error "Perspective `%s' does not exist" name))
   (remove-hook 'kill-buffer-query-functions 'persp-maybe-kill-buffer)
   (with-perspective name
     (run-hooks 'persp-killed-hook)

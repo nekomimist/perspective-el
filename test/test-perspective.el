@@ -697,6 +697,16 @@ not automatically switch to the perspective."
   ;; cleanup
   (should (get-buffer-create "*scratch*")))
 
+(ert-deftest basic-persp-kill-missing-perspective-errors ()
+  "Killing a missing perspective should error without recreating it."
+  (persp-test-with-persp
+    (persp-switch "A")
+    (persp-kill "A")
+    (should (equal (list "main") (sort (persp-names) #'string-lessp)))
+    (should-error (persp-kill "A"))
+    (should (equal (list "main") (sort (persp-names) #'string-lessp)))
+    (should (equal "main" (persp-current-name)))))
+
 (ert-deftest basic-persp-get-buffers ()
   "Test `persp-get-buffers'.
 Expect the list of a perspective's buffers."
