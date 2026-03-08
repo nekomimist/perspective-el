@@ -2404,6 +2404,57 @@ persp-test-make-sample-environment."
         (persp-test-check-sample-environment))
     (persp-test-clean-files "A1" "A2" "A3" "B1" "B2" "B3" "B4" "state-1.el")))
 
+(ert-deftest state-save-does-not-load-lazy-perspectives ()
+  (unwind-protect
+      (persp-test-with-persp
+        (persp-test-with-files nil (A1 A2 A3 B1 B2 B3 B4)
+          (persp-test-make-sample-environment)
+          (persp-state-save "state-1.el"))
+        (persp-mode -1)
+        (delete-other-windows)
+        (persp-mode 1)
+        (persp-state-load "state-1.el")
+        (should (= 0 (length (persp-test-buffer-list-all))))
+        (should (gethash "A" (frame-parameter nil 'persp--state-lazy-pending)))
+        (should (gethash "B" (frame-parameter nil 'persp--state-lazy-pending)))
+        (persp-state-save "state-2.el")
+        (should (= 0 (length (persp-test-buffer-list-all))))
+        (should (gethash "A" (frame-parameter nil 'persp--state-lazy-pending)))
+        (should (gethash "B" (frame-parameter nil 'persp--state-lazy-pending)))
+        (persp-mode -1)
+        (delete-other-windows)
+        (persp-mode 1)
+        (persp-state-load "state-2.el")
+        (should (= 0 (length (persp-test-buffer-list-all))))
+        (persp-test-check-sample-environment))
+    (persp-test-clean-files "A1" "A2" "A3" "B1" "B2" "B3" "B4"
+                            "state-1.el" "state-2.el")))
+
+(ert-deftest state-kill-does-not-load-lazy-perspective ()
+  (unwind-protect
+      (persp-test-with-persp
+        (persp-test-with-files nil (A1 A2 A3 B1 B2 B3 B4)
+          (persp-test-make-sample-environment)
+          (persp-state-save "state-1.el"))
+        (persp-mode -1)
+        (delete-other-windows)
+        (persp-mode 1)
+        (persp-state-load "state-1.el")
+        (should (member "A" (persp-names)))
+        (should (gethash "A" (frame-parameter nil 'persp--state-lazy-pending)))
+        (should (gethash "B" (frame-parameter nil 'persp--state-lazy-pending)))
+        (persp-kill "A")
+        (should-not (member "A" (persp-names)))
+        (should-not (gethash "A" (frame-parameter nil 'persp--state-lazy-pending)))
+        (should (gethash "B" (frame-parameter nil 'persp--state-lazy-pending)))
+        (should (= 0 (length (persp-test-buffer-list-all))))
+        (persp-switch "B")
+        (should (equal (list "B1" "B2" "B3" "B4")
+                       (sort (mapcar #'buffer-name (persp-test-buffer-list (persp-curr)))
+                             #'string-lessp)))
+        (persp-switch "main"))
+    (persp-test-clean-files "A1" "A2" "A3" "B1" "B2" "B3" "B4" "state-1.el")))
+
 (ert-deftest state-load-legacy-format-errors ()
   (unwind-protect
       (persp-test-with-persp

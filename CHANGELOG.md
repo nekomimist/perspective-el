@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `persp-maybe-kill-buffer`: improve performance by avoiding switching perspectives and rebuilding buffer-name lists ([#226](https://github.com/nex3/perspective-el/issues/226)).
 - `persp-delete-frame`: guard against reentrant frame-deletion cleanup to avoid excessive Lisp nesting when killing frames with dedicated windows ([#195](https://github.com/nex3/perspective-el/issues/195)).
 - `persp-kill`: error cleanly when asked to kill a missing perspective instead of re-entering perspective switching logic.
+- `persp-state-save`: preserve lazily deferred perspectives during save without forcing their window state to load first.
+- `persp-kill`: remove lazily deferred perspectives without forcing their pending window state to load first.
 
 ### Added
 

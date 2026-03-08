@@ -90,6 +90,11 @@ Saved state includes:
 - merge metadata
 - per-perspective window state
 
+When lazy restore is enabled, saving reuses any still-deferred per-perspective
+state instead of activating those perspectives and forcing their buffers/windows
+to load. Killing a still-deferred perspective similarly operates on its pending
+state directly instead of activating it first.
+
 Transient/unpersistable window buffers are rewritten to the perspective scratch
 buffer during save-time window-state massage.
 

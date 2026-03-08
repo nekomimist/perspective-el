@@ -411,7 +411,9 @@ to save sessions to and restore from.
 By default, `persp-state-load` restores file-visiting and `dired` buffers
 lazily: buffers for a perspective are opened when that perspective is first
 activated. This keeps load times reasonable when state files contain many
-buffers across many perspectives.
+buffers across many perspectives. `persp-state-save` preserves deferred
+perspectives without forcing them to load first, and unopened perspectives can
+be killed without forcing their saved window state to restore.
 
 State files are versioned. Loading unsupported legacy formats now raises an
 error; resave the session with a current Perspective version to migrate.

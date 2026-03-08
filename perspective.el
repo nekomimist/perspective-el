@@ -1210,14 +1210,24 @@ See also `persp-remove-buffer'."
 Killing a perspective means that all buffers associated with that
 perspective and no others are killed."
   (interactive "i")
-  (if (null name) (setq name (persp-prompt (persp-current-name) t)))
-  (unless (gethash name (perspectives-hash))
-    (persp-error "Perspective `%s' does not exist" name))
-  (remove-hook 'kill-buffer-query-functions 'persp-maybe-kill-buffer)
-  (with-perspective name
-    (run-hooks 'persp-killed-hook)
-    (mapc 'persp-remove-buffer (persp-current-buffers))
-    (setf (persp-killed (persp-curr)) t))
+  (let* ((pending-table (frame-parameter nil 'persp--state-lazy-pending))
+         (persp (and name (gethash name (perspectives-hash)))))
+    (if (null name) (setq name (persp-prompt (persp-current-name) t)))
+    (setq persp (gethash name (perspectives-hash)))
+    (unless persp
+      (persp-error "Perspective `%s' does not exist" name))
+    (remove-hook 'kill-buffer-query-functions 'persp-maybe-kill-buffer)
+    (if (and pending-table (gethash name pending-table))
+        (let ((buffers (copy-sequence (persp-buffers persp))))
+          (persp-let-frame-parameters ((persp--curr persp))
+            (run-hooks 'persp-killed-hook)
+            (mapc #'persp-remove-buffer buffers)
+            (setf (persp-killed persp) t))
+          (remhash name pending-table))
+      (with-perspective name
+        (run-hooks 'persp-killed-hook)
+        (mapc 'persp-remove-buffer (persp-current-buffers))
+        (setf (persp-killed (persp-curr)) t))))
   (when persp-avoid-killing-last-buffer-in-perspective
     (add-hook 'kill-buffer-query-functions 'persp-maybe-kill-buffer))
   (remhash name (perspectives-hash))
@@ -2090,6 +2100,27 @@ to the perspective's *scratch* buffer."
     (t (cons (car entry) (cl-loop for e in (cdr entry)
                                collect (persp--state-window-state-massage e persp valid-buffers))))))
 
+(defun persp--state-frame-persp-data (persp)
+  "Return serializable state for PERSP in the current frame.
+
+If PERSP still has deferred lazy-load state pending, reuse that state
+instead of switching to the perspective and forcing it to load."
+  (or (gethash persp (frame-parameter nil 'persp--state-lazy-pending))
+      (with-perspective persp
+        (let* ((buffer-entries
+                (cl-loop for buffer in (persp-current-buffers)
+                         for entry = (persp--state-make-buffer-entry buffer)
+                         if entry collect entry))
+               (buffers (mapcar #'persp--state-buffer-entry-name
+                                buffer-entries))
+               (windows
+                (cl-loop for entry in (window-state-get (frame-root-window) t)
+                         collect (persp--state-window-state-massage entry persp buffers))))
+          (make-persp--state-single
+           :buffers buffers
+           :buffer-entries buffer-entries
+           :windows windows)))))
+
 (defun persp--state-frame-data ()
   (cl-loop for frame in (frame-list)
            if (frame-parameter frame 'persp--hash) ; XXX: filter non-perspective-enabled frames
@@ -2098,22 +2129,9 @@ to the perspective's *scratch* buffer."
                            (persp-names-in-order (persp-names)))
                        (cl-loop for persp in persp-names-in-order do
                                 (unless (persp-killed-p (gethash persp (perspectives-hash)))
-                                  (with-perspective persp
-                                    (let* ((buffer-entries
-                                            (cl-loop for buffer in (persp-current-buffers)
-                                                     for entry = (persp--state-make-buffer-entry buffer)
-                                                     if entry collect entry))
-                                           (buffers (mapcar #'persp--state-buffer-entry-name
-                                                            buffer-entries))
-                                           (windows
-                                            (cl-loop for entry in (window-state-get (frame-root-window) t)
-                                                     collect (persp--state-window-state-massage entry persp buffers))))
-                                      (puthash persp
-                                               (make-persp--state-single
-                                                :buffers buffers
-                                                :buffer-entries buffer-entries
-                                                :windows windows)
-                                               persps-in-frame)))))
+                                  (puthash persp
+                                           (persp--state-frame-persp-data persp)
+                                           persps-in-frame)))
                        (make-persp--state-frame-v2
                         :persps persps-in-frame
                         :order persp-names-in-order
