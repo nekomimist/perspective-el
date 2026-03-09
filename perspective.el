@@ -707,6 +707,23 @@ buffer called \"*scratch* (NAME)\"."
         (switch-to-buffer (persp-get-scratch-buffer name))
         (persp-reset-windows))))
 
+(defun persp--make-empty-persp (name)
+  "Return a perspective named NAME, creating an empty one if missing.
+Unlike `persp-new', this does not create a scratch buffer or alter windows."
+  (or (gethash name (perspectives-hash))
+      (let ((persp (make-persp-internal
+                    :name name
+                    :buffers nil
+                    :window-configuration (current-window-configuration)
+                    :point-marker (point-marker))))
+        (with-current-perspective
+          (setf (persp-local-variables persp)
+                (copy-tree (persp-local-variables (persp-curr)))))
+        (puthash name persp (perspectives-hash))
+        (persp-let-frame-parameters ((persp--curr persp))
+          (run-hooks 'persp-created-hook))
+        persp)))
+
 (defun persp-reactivate-buffers (buffers)
   "Raise BUFFERS to the top of the most-recently-selected list.
 Returns BUFFERS with all non-living buffers removed.
@@ -829,6 +846,9 @@ If NORECORD is non-nil, do not update the
   (interactive "i")
   (unless (persp-valid-name-p name)
     (setq name (persp-prompt (and (persp-last) (persp-name (persp-last))))))
+  (when (and persp-state-load-lazy
+             (gethash name (persp--state-lazy-pending-table)))
+    (persp--state-materialize-persp name))
   (if (and (persp-curr) (equal name (persp-current-name)))
       (progn
         (when persp-state-load-lazy
@@ -1244,7 +1264,12 @@ perspective and no others are killed."
   (when (or (not (persp-curr)) (equal name (persp-current-name)))
     ;; Don't let persp-last get set to the deleted persp.
     (persp-let-frame-parameters ((persp--last (persp-last)))
-      (persp-switch (persp-find-some)))))
+      (let ((next (or (persp-find-some)
+                      (and (gethash persp-initial-frame-name (perspectives-hash))
+                           persp-initial-frame-name)
+                      (car (persp-names)))))
+        (when next
+          (persp-switch next))))))
 
 (defun persp-kill-others ()
   "Kill all perspectives except the current one."
@@ -2155,24 +2180,61 @@ instead of switching to the perspective and forcing it to load."
             (_ (find-file-noselect path)))
         (error nil)))))
 
-(defun persp--state-maybe-load-current-persp ()
-  "Load deferred state for the current perspective, if any."
-  (unless persp--state-loading-in-progress
-    (let* ((pending (frame-parameter nil 'persp--state-lazy-pending))
-           (persp-name (and pending (persp-current-name)))
-           (state-single (and persp-name (gethash persp-name pending))))
+(defun persp--state-needs-scratch-p (state-single persp-name)
+  "Return non-nil when STATE-SINGLE needs PERSP-NAME's scratch buffer."
+  (let ((scratch-name (persp-scratch-buffer persp-name))
+        (persisted-buffers (persp--state-single-buffers state-single)))
+    (cl-labels ((walk (entry)
+                  (cond
+                   ((not (consp entry)) nil)
+                   ((and (eq (car entry) 'buffer)
+                         (let ((buffer-name (cadr entry)))
+                           (or (equal buffer-name scratch-name)
+                               (not (member buffer-name persisted-buffers)))))
+                    t)
+                   (t
+                    (or (walk (car entry))
+                        (walk (cdr entry)))))))
+      (walk (persp--state-single-windows state-single)))))
+
+(defun persp--state-materialize-persp (persp-name &optional frame)
+  "Load deferred state for PERSP-NAME in FRAME, if any."
+  (with-selected-frame (or frame (selected-frame))
+    (let* ((pending (persp--state-lazy-pending-table))
+           (state-single (gethash persp-name pending))
+           (persp (gethash persp-name (perspectives-hash))))
       (when state-single
+        (unless persp
+          (setq persp (persp--make-empty-persp persp-name)))
+        (setf (persp-buffers persp) nil)
         (dolist (entry (persp--state-single-buffer-entries state-single))
           (let ((buffer (persp--state-open-buffer-entry entry)))
             (when (buffer-live-p buffer)
-              (persp-add-buffer buffer))))
-        ;; XXX: split-window-horizontally is necessary for window-state-put to
-        ;; succeed? Something goes haywire with root windows without it.
-        (split-window-horizontally)
-        (window-state-put (persp--state-single-windows state-single)
-                          (frame-root-window)
-                          'safe)
-        (remhash persp-name pending)))))
+              (push buffer (persp-buffers persp)))))
+        (when (persp--state-needs-scratch-p state-single persp-name)
+          (push (persp-get-scratch-buffer persp-name) (persp-buffers persp)))
+        (setf (persp-buffers persp) (nreverse (delete-dups (persp-buffers persp))))
+        ;; Build the window configuration without leaving behind a visible switch.
+        (save-window-excursion
+          (persp-let-frame-parameters ((persp--curr persp))
+            (persp-reset-windows)
+            (when (> (length (window-list)) 0)
+              (ignore-errors (split-window-horizontally)))
+            (window-state-put (persp--state-single-windows state-single)
+                              (frame-root-window)
+                              'safe)
+            (setf (persp-window-configuration persp) (current-window-configuration))
+            (setf (persp-point-marker persp) (point-marker))))
+        (remhash persp-name pending))
+      persp)))
+
+(defun persp--state-maybe-load-current-persp ()
+  "Load deferred state for the current perspective, if any."
+  (unless persp--state-loading-in-progress
+    (let ((persp-name (and (frame-parameter nil 'persp--state-lazy-pending)
+                           (persp-current-name))))
+      (when persp-name
+        (persp--state-materialize-persp persp-name)))))
 
 (defun persp-purge-exception-p (buffer)
   (if (buffer-live-p buffer)
@@ -2284,27 +2346,41 @@ they are opened the first time each perspective is activated."
                    (frame-persp-order (reverse (persp--state-frame-v2-order frame)))
                    (frame-persp-merge-list (persp--state-frame-v2-merge-list frame)))
                (with-selected-frame emacs-frame
-                 (set-frame-parameter emacs-frame 'persp-merge-list frame-persp-merge-list)
-                 (set-frame-parameter emacs-frame 'persp--state-lazy-pending
-                                      (make-hash-table :test 'equal))
-                 (cl-loop for persp in frame-persp-order do
-                          (let ((state-single (gethash persp frame-persp-table)))
-                            (persp-switch persp)
-                            (set-frame-parameter nil 'persp-merge-list frame-persp-merge-list)
-                            (when state-single
+                 (let ((current-name (and (persp-curr) (persp-current-name)))
+                       (last-name (and (persp-last) (persp-name (persp-last)))))
+                   (set-frame-parameter emacs-frame 'persp-merge-list frame-persp-merge-list)
+                   (set-frame-parameter emacs-frame 'persp--state-lazy-pending
+                                        (make-hash-table :test 'equal))
+                   (cl-loop for persp in frame-persp-order do
+                            (let ((state-single (gethash persp frame-persp-table)))
                               (if persp-state-load-lazy
-                                  (puthash persp state-single (persp--state-lazy-pending-table))
-                                (dolist (entry (persp--state-single-buffer-entries state-single))
-                                  (let ((buffer (persp--state-open-buffer-entry entry)))
-                                    (when (buffer-live-p buffer)
-                                      (persp-add-buffer buffer))))
-                                ;; XXX: split-window-horizontally is necessary for
-                                ;; window-state-put to succeed? Something goes haywire with root
-                                ;; windows without it.
-                                (split-window-horizontally)
-                                (window-state-put (persp--state-single-windows state-single)
-                                                  (frame-root-window emacs-frame)
-                                                  'safe)))))))))
+                                  (progn
+                                    (persp--make-empty-persp persp)
+                                    (when state-single
+                                      (puthash persp state-single
+                                               (persp--state-lazy-pending-table))))
+                                (persp-switch persp)
+                                (set-frame-parameter nil 'persp-merge-list frame-persp-merge-list)
+                                (when state-single
+                                  (dolist (entry (persp--state-single-buffer-entries state-single))
+                                    (let ((buffer (persp--state-open-buffer-entry entry)))
+                                      (when (buffer-live-p buffer)
+                                        (persp-add-buffer buffer))))
+                                  ;; XXX: split-window-horizontally is necessary for
+                                  ;; window-state-put to succeed? Something goes haywire with root
+                                  ;; windows without it.
+                                  (split-window-horizontally)
+                                  (window-state-put (persp--state-single-windows state-single)
+                                                    (frame-root-window emacs-frame)
+                                                    'safe)))))
+                    (when persp-state-load-lazy
+                      (let ((current-persp (gethash (or current-name persp-initial-frame-name)
+                                                    (perspectives-hash)))
+                            (last-persp (and last-name
+                                             (gethash last-name (perspectives-hash)))))
+                        (set-frame-parameter nil 'persp--curr current-persp)
+                        (set-frame-parameter nil 'persp--last last-persp)
+                        (persp-update-modestring))))))))
   ;; after hook
   (run-hooks 'persp-state-after-load-hook))
 

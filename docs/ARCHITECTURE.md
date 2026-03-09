@@ -92,11 +92,16 @@ Saved state includes:
 
 When lazy restore is enabled, saving reuses any still-deferred per-perspective
 state instead of activating those perspectives and forcing their buffers/windows
-to load. Killing a still-deferred perspective similarly operates on its pending
+to load. Loading follows a two-step flow in that mode: state file import first
+registers empty perspective stubs plus pending payload, and the first explicit
+activation of each perspective materializes its buffers and window state on
+demand. Killing a still-deferred perspective similarly operates on its pending
 state directly instead of activating it first.
 
 Transient/unpersistable window buffers are rewritten to the perspective scratch
-buffer during save-time window-state massage.
+buffer during save-time window-state massage. The corresponding scratch buffer
+is created lazily as part of perspective materialization, not at state-load
+registration time.
 
 ## Perspective Merging
 

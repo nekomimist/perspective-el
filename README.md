@@ -409,11 +409,15 @@ perspective durability on disk. When called interactively, they prompt for files
 to save sessions to and restore from.
 
 By default, `persp-state-load` restores file-visiting and `dired` buffers
-lazily: buffers for a perspective are opened when that perspective is first
-activated. This keeps load times reasonable when state files contain many
+lazily: loading a state file registers restored perspectives without activating
+them, and buffers for a perspective are opened only when that perspective is
+first activated. This keeps load times reasonable when state files contain many
 buffers across many perspectives. `persp-state-save` preserves deferred
 perspectives without forcing them to load first, and unopened perspectives can
-be killed without forcing their saved window state to restore.
+be killed without forcing their saved window state to restore. Perspective
+scratch buffers are also created on demand: a deferred perspective only gets a
+`*scratch* (NAME)` buffer when it is materialized and its saved window state
+actually needs one.
 
 State files are versioned. Loading unsupported legacy formats now raises an
 error; resave the session with a current Perspective version to migrate.

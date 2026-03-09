@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `persp-kill`: error cleanly when asked to kill a missing perspective instead of re-entering perspective switching logic.
 - `persp-state-save`: preserve lazily deferred perspectives during save without forcing their window state to load first.
 - `persp-kill`: remove lazily deferred perspectives without forcing their pending window state to load first.
+- `persp-state-load`: in lazy mode, register restored perspectives without eagerly creating their perspective-specific scratch buffers; scratch is now created only when a deferred perspective is materialized and needs it.
 
 ### Added
 
