@@ -13,6 +13,17 @@
 - No silent breaking changes: For compatibility-impacting changes, document impact and
   migration steps in user-facing docs.
 
+## Git commit message preferences
+- Write commit messages in English.
+- Use Conventional Commits for the subject line.
+- Format the subject as `<type>[optional scope]: <description>`.
+- Choose the type based on the actual intent of the change.
+- Keep the subject concise, clear, and specific.
+- Add a body only when it provides useful context.
+- Never include the literal characters `\n` in the commit message.
+- If the message has multiple paragraphs, preserve actual newlines in the final commit.
+- Avoid vague subjects such as `update`, `changes`, or `fix stuff`.
+
 ## Communication Style
 - Important: Do not remove or rename this section. Keep the header exactly as "##
   Communication Style". This section is mandatory.
