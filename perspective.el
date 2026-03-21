@@ -1107,14 +1107,31 @@ See also `persp-remove-buffer'."
                ;; can suffice for what we are doing here.
                (push name candidates-for-keeping)))))
        (perspectives-hash))
+      (maphash
+       (lambda (name state-single)
+         (unless (equal name current-name)
+           (let ((buffer-names
+                  (cl-loop for buffer-name in (persp--state-single-buffers state-single)
+                           if (persp--buffer-name-visible-p buffer-name)
+                           collect buffer-name)))
+             (when (member bufstr buffer-names)
+               (if (cdr buffer-names)
+                   (push name candidates-for-removal)
+                 ;; We use a list for debugging purposes, a simple bool
+                 ;; can suffice for what we are doing here.
+                 (push name candidates-for-keeping))))))
+       (persp--state-lazy-pending-table))
       (cond
        ;; When there aren't perspectives with the buffer as the only
        ;; buffer, it can be killed safely.  Also cleanup killed ones
        ;; found in perspectives listing the buffer to be killed.
        ((not candidates-for-keeping)
+        ;; Switching to a perspective that isn't the current, should
+        ;; automatically cleanup previously killed buffers which are
+        ;; still in the perspective's list of buffers.  Removing the
+        ;; buffer to be killed should also keep the list clean.
         (dolist (name candidates-for-removal)
-          (with-perspective name
-            (persp-forget-buffer buffer)))
+          (persp--cleanup-killed-buffer-in-perspective name buffer))
         (when current-persp-removal-needed
           (setf (persp-current-buffers) (remq buffer (persp-current-buffers))))
         t)
@@ -1124,8 +1141,7 @@ See also `persp-remove-buffer'."
        ;; forget about the buffer.
        ((or candidates-for-removal current-persp-removal-needed)
         (dolist (name candidates-for-removal)
-          (with-perspective name
-            (persp-forget-buffer buffer)))
+          (persp--forget-buffer-in-perspective name buffer))
         (when current-persp-removal-needed
           (persp-forget-buffer buffer))
         nil)))))
@@ -2125,6 +2141,27 @@ to the perspective's *scratch* buffer."
     (t (cons (car entry) (cl-loop for e in (cdr entry)
                                collect (persp--state-window-state-massage e persp valid-buffers))))))
 
+(defun persp--state-window-state-replace-buffer (entry from-buffer-name to-buffer-name)
+  "Rewrite saved window state ENTRY replacing FROM-BUFFER-NAME with TO-BUFFER-NAME."
+  (cond
+   ((not (consp entry))
+    entry)
+   ((atom (cdr entry))
+    entry)
+   ((eq 'leaf (car entry))
+    (let ((leaf-props (cdr entry)))
+      (cons 'leaf
+            (cl-loop for prop in leaf-props
+                     collect (if (and (eq 'buffer (car prop))
+                                      (equal from-buffer-name (cadr prop)))
+                                 (cons 'buffer
+                                       (cons to-buffer-name (cddr prop)))
+                               prop)))))
+   (t (cons (car entry)
+            (cl-loop for e in (cdr entry)
+                     collect (persp--state-window-state-replace-buffer
+                              e from-buffer-name to-buffer-name))))))
+
 (defun persp--state-frame-persp-data (persp)
   "Return serializable state for PERSP in the current frame.
 
@@ -2168,6 +2205,64 @@ instead of switching to the perspective and forcing it to load."
       (let ((table (make-hash-table :test 'equal)))
         (set-frame-parameter frame 'persp--state-lazy-pending table)
         table)))
+
+(defun persp--buffer-name-visible-p (buffer-name)
+  "Return non-nil when BUFFER-NAME should participate in perspective buffer logic."
+  (and (stringp buffer-name)
+       (not (string-match-p (persp--make-ignore-buffer-rx) buffer-name))))
+
+(defun persp--buffer-names-for-kill-buffer (persp-name &optional frame)
+  "Return buffer names for PERSP-NAME without forcing deferred state to load."
+  (with-selected-frame (or frame (selected-frame))
+    (let ((state-single (gethash persp-name (persp--state-lazy-pending-table)))
+          (persp (gethash persp-name (perspectives-hash))))
+      (cond
+       (state-single
+        (cl-loop for buffer-name in (persp--state-single-buffers state-single)
+                 if (persp--buffer-name-visible-p buffer-name)
+                 collect buffer-name))
+       (persp
+        (cl-loop for buffer in (persp-buffers persp)
+                 for buffer-name = (and (buffer-live-p buffer)
+                                        (buffer-name buffer))
+                 if (persp--buffer-name-visible-p buffer-name)
+                 collect buffer-name))))))
+
+(defun persp--state-forget-buffer-in-pending-perspective (persp-name buffer-name &optional frame)
+  "Forget BUFFER-NAME from deferred PERSP-NAME in FRAME."
+  (with-selected-frame (or frame (selected-frame))
+    (let* ((pending (persp--state-lazy-pending-table))
+           (state-single (gethash persp-name pending)))
+      (when state-single
+        (setf (persp--state-single-buffers state-single)
+              (delete buffer-name
+                      (copy-sequence (persp--state-single-buffers state-single))))
+        (setf (persp--state-single-buffer-entries state-single)
+              (cl-remove buffer-name
+                         (persp--state-single-buffer-entries state-single)
+                         :key #'persp--state-buffer-entry-name
+                         :test #'equal))
+        (setf (persp--state-single-windows state-single)
+              (persp--state-window-state-replace-buffer
+               (persp--state-single-windows state-single)
+               buffer-name
+               (persp-scratch-buffer persp-name)))
+        state-single))))
+
+(defun persp--cleanup-killed-buffer-in-perspective (persp-name buffer)
+  "Remove BUFFER from PERSP-NAME after BUFFER has been approved for killing."
+  (if (gethash persp-name (persp--state-lazy-pending-table))
+      (persp--state-forget-buffer-in-pending-perspective persp-name (buffer-name buffer))
+    (with-perspective persp-name
+      ;; remove the buffer that has to be killed from the list
+      (setf (persp-current-buffers) (remq buffer (persp-current-buffers))))))
+
+(defun persp--forget-buffer-in-perspective (persp-name buffer)
+  "Disassociate BUFFER from PERSP-NAME without forcing deferred state to load."
+  (if (gethash persp-name (persp--state-lazy-pending-table))
+      (persp--state-forget-buffer-in-pending-perspective persp-name (buffer-name buffer))
+    (with-perspective persp-name
+      (persp-forget-buffer buffer))))
 
 (defun persp--state-open-buffer-entry (entry)
   "Open state ENTRY and return its buffer, or nil."

@@ -414,7 +414,9 @@ them, and buffers for a perspective are opened only when that perspective is
 first activated. This keeps load times reasonable when state files contain many
 buffers across many perspectives. `persp-state-save` preserves deferred
 perspectives without forcing them to load first, and unopened perspectives can
-be killed without forcing their saved window state to restore. Perspective
+be killed without forcing their saved window state to restore. Buffer kills and
+related operations such as `vc-follow-link` also update deferred perspectives
+without forcing them to materialize. Perspective
 scratch buffers are also created on demand: a deferred perspective only gets a
 `*scratch* (NAME)` buffer when it is materialized and its saved window state
 actually needs one.
