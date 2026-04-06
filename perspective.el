@@ -127,6 +127,18 @@ save state when exiting Emacs."
   :group 'perspective-mode
   :type 'file)
 
+(defcustom persp-state-excluded-perspective-names nil
+  "Perspective names that `persp-state-save` should omit from saved state.
+
+Names are matched exactly. Excluded perspectives are omitted from the
+saved frame tables, their merge metadata is dropped, and their file
+entries are omitted from the saved file list.
+
+This affects only what is written to disk. It does not delete or
+otherwise modify live perspectives in the running Emacs session."
+  :group 'perspective-mode
+  :type '(repeat string))
+
 (defcustom persp-state-load-lazy t
   "When non-nil, defer opening buffers restored by `persp-state-load'.
 
@@ -2079,6 +2091,14 @@ PERSP-SET-IDO-BUFFERS)."
                     (with-current-buffer buffer ; dired special case
                       default-directory))))
 
+(defun persp--state-normalize-excluded-perspective-names (names)
+  "Return a normalized exact-match exclusion list from NAMES."
+  (delete-dups
+   (cl-loop for name in names
+            if (and (stringp name)
+                    (not (string-empty-p name)))
+            collect name)))
+
 (defun persp--state-make-buffer-entry (buffer)
   "Return a serializable state entry for BUFFER, or nil."
   (when (persp--state-interesting-buffer-p buffer)
@@ -2183,21 +2203,49 @@ instead of switching to the perspective and forcing it to load."
            :buffer-entries buffer-entries
            :windows windows)))))
 
-(defun persp--state-frame-data ()
+(defun persp--state-filtered-merge-list (merge-list excluded-names)
+  "Return MERGE-LIST with entries involving EXCLUDED-NAMES removed."
+  (cl-remove-if
+   (lambda (merge)
+     (or (member (plist-get merge :base-perspective) excluded-names)
+         (member (plist-get merge :merged-perspective) excluded-names)))
+   merge-list))
+
+(defun persp--state-files-from-frames (frames)
+  "Return interesting file paths referenced by serialized FRAMES."
+  (delete-dups
+   (cl-loop for frame in frames
+            append (cl-loop for persp-state
+                            being the hash-values of (persp--state-frame-v2-persps frame)
+                            append (cl-loop for entry in (persp--state-single-buffer-entries persp-state)
+                                            collect (persp--state-buffer-entry-path entry))))))
+
+(defun persp--state-frame-data (&optional excluded-names)
+  "Return serialized frame data, omitting perspectives in EXCLUDED-NAMES."
+  (setq excluded-names
+        (persp--state-normalize-excluded-perspective-names excluded-names))
   (cl-loop for frame in (frame-list)
            if (frame-parameter frame 'persp--hash) ; XXX: filter non-perspective-enabled frames
-           collect (with-selected-frame frame
-                     (let ((persps-in-frame (make-hash-table :test 'equal))
-                           (persp-names-in-order (persp-names)))
-                       (cl-loop for persp in persp-names-in-order do
-                                (unless (persp-killed-p (gethash persp (perspectives-hash)))
-                                  (puthash persp
-                                           (persp--state-frame-persp-data persp)
-                                           persps-in-frame)))
-                       (make-persp--state-frame-v2
-                        :persps persps-in-frame
-                        :order persp-names-in-order
-                        :merge-list (frame-parameter nil 'persp-merge-list))))))
+           nconc (with-selected-frame frame
+                   (let ((persps-in-frame (make-hash-table :test 'equal))
+                         (persp-names-in-order
+                          (cl-remove-if (lambda (persp)
+                                          (member persp excluded-names))
+                                        (persp-names))))
+                     (cl-loop for persp in persp-names-in-order do
+                              (unless (persp-killed-p (gethash persp (perspectives-hash)))
+                                (puthash persp
+                                         (persp--state-frame-persp-data persp)
+                                         persps-in-frame)))
+                     (if (> (hash-table-count persps-in-frame) 0)
+                         (list
+                          (make-persp--state-frame-v2
+                           :persps persps-in-frame
+                           :order persp-names-in-order
+                           :merge-list (persp--state-filtered-merge-list
+                                        (frame-parameter nil 'persp-merge-list)
+                                        excluded-names)))
+                       nil)))))
 
 (defun persp--state-lazy-pending-table (&optional frame)
   "Return pending lazy-load state hash for FRAME."
@@ -2339,7 +2387,8 @@ instead of switching to the perspective and forcing it to load."
     nil))
 
 ;;;###autoload
-(cl-defun persp-state-save (&optional file interactive?)
+(cl-defun persp-state-save (&optional file interactive?
+                                      (excluded-names nil excluded-names-p))
   "Save the current perspective state to FILE.
 
 FILE defaults to the value of persp-state-default-file if it is
@@ -2348,6 +2397,10 @@ set.
 Each perspective's buffer list and window layout will be saved.
 Frames and their associated perspectives will also be saved,
 but not the original frame sizes.
+
+EXCLUDED-NAMES, when non-nil, is a list of perspective names to omit
+from the saved state. When nil, `persp-state-excluded-perspective-names'
+provides the default exclusion list.
 
 Buffers with * characters in their names, as well as buffers without
 associated files will be ignored. If such buffers are currently
@@ -2395,16 +2448,25 @@ visible in a perspective as windows, they will be saved as
     ;; before hook
     (run-hooks 'persp-state-before-save-hook)
     ;; optionally purge initial perspective of entries
-    (when persp-purge-initial-persp-on-save
-      (mapc 'kill-buffer (cl-remove-if #'persp-purge-exception-p (persp-all-get persp-initial-frame-name nil))))
-    ;; actually save
-    (persp-save)
-    (let ((state-complete (make-persp--state-complete
-                           :format-version persp--state-format-version
-                           :files (persp--state-file-data)
-                           :frames (persp--state-frame-data))))
-      ;; create or overwrite target-file:
-      (with-temp-file target-file (prin1 state-complete (current-buffer))))
+    (let* ((excluded-names
+            (persp--state-normalize-excluded-perspective-names
+             (if excluded-names-p
+                 excluded-names
+               persp-state-excluded-perspective-names)))
+           frames)
+      (when (and persp-purge-initial-persp-on-save
+                 (not (member persp-initial-frame-name excluded-names)))
+        (mapc 'kill-buffer (cl-remove-if #'persp-purge-exception-p
+                                         (persp-all-get persp-initial-frame-name nil))))
+      ;; actually save
+      (persp-save)
+      (setq frames (persp--state-frame-data excluded-names))
+      (let ((state-complete (make-persp--state-complete
+                             :format-version persp--state-format-version
+                             :files (persp--state-files-from-frames frames)
+                             :frames frames)))
+        ;; create or overwrite target-file:
+        (with-temp-file target-file (prin1 state-complete (current-buffer)))))
     ;; after hook
     (run-hooks 'persp-state-after-save-hook)))
 

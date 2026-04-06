@@ -90,6 +90,12 @@ Saved state includes:
 - merge metadata
 - per-perspective window state
 
+`persp-state-save` can filter out exact perspective names before writing the
+state file. That filtering happens at serialization time: excluded
+perspectives are omitted from per-frame tables and order lists, merges that
+reference them are dropped, empty frames are skipped, and the top-level file
+list is rebuilt from the remaining serialized buffer entries.
+
 When lazy restore is enabled, saving reuses any still-deferred per-perspective
 state instead of activating those perspectives and forcing their buffers/windows
 to load. Loading follows a two-step flow in that mode: state file import first

@@ -434,6 +434,15 @@ perspective sessions when Emacs exits:
 (add-hook 'kill-emacs-hook #'persp-state-save)
 ```
 
+A custom variable, `persp-state-excluded-perspective-names`, can omit named
+perspectives from saved state. `persp-state-save` also accepts an optional
+third argument, a list of exact perspective names to exclude for that call.
+Excluded perspectives are removed from saved frame tables, merge metadata that
+references them is dropped, and file entries are recalculated from the
+remaining saved perspectives. Excluding the initial perspective only affects
+what gets written to disk: `persp-state-load` still bootstraps an empty initial
+perspective for the live session before restored state is applied.
+
 A limitation of `persp-state-save` and `persp-state-load` is that they do not
 attempt to deal with non-file-visiting buffers with non-trivial state. Saving
 shell, REPL, and `compilation-mode` buffers is not supported. When saved to a
@@ -466,6 +475,8 @@ customize`). The following are likely to be of most interest:
   commands.
 - `persp-state-default-file`: Changes the default file to use for saving and
   loading Perspective state.
+- `persp-state-excluded-perspective-names`: Omits exact perspective names from
+  `persp-state-save` output.
 - `persp-show-modestring`: Determines if Perspective should show its status in
   the modeline. It defaults to `t`, but can also be `nil` (turning off the
   modeline status display) or `'header` (which uses the header line instead of
