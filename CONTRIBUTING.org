@@ -5,6 +5,36 @@ Thank you for considering making a code contribution to Perspective!
 Please follow the following procedures before opening a pull request.
 
 
+** Fork branch workflow
+
+This fork uses separate branches for upstream sync and local development.
+
+- ~master~ is a local mirror of ~upstream/master~. Keep it fast-forwarded to
+  upstream and do not commit directly to it.
+- ~origin/master~ may remain as the public mirror of ~master~. Treat it as
+  read-only in normal development.
+- ~nekomimist~ is the main development branch for this fork. Local changes land
+  there, and ~origin/nekomimist~ is the default branch on GitHub.
+- Branches intended for upstream pull requests should start from ~master~ so
+  local fork-only commits do not leak into upstream review.
+- Branches intended only for this fork should start from ~nekomimist~.
+
+Recommended sync flow:
+
+#+BEGIN_SRC shell
+git fetch --all --prune
+git switch master
+git merge --ff-only upstream/master
+git push origin master
+git switch nekomimist
+git rebase master
+git push --force-with-lease origin nekomimist
+#+END_SRC
+
+If ~nekomimist~ ever becomes a shared branch, prefer merging ~master~ into it
+instead of rebasing published history.
+
+
 ** Run automated tests
 
 Perspective has a growing handful of tests. Please run them manually before [[https://github.com/nex3/perspective-el/actions][GitHub Actions]] does.
