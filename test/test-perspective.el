@@ -2568,6 +2568,72 @@ persp-test-make-sample-environment."
         (should-error (persp-state-load "state-legacy.el")))
     (persp-test-clean-files "state-legacy.el")))
 
+(ert-deftest state-load-missing-file-errors-without-enabling-mode ()
+  (persp-mode -1)
+  (unwind-protect
+      (progn
+        (should-not persp-mode)
+        (should-error (persp-state-load "state-missing.el") :type 'user-error)
+        (should-not persp-mode))
+    (persp-mode -1)
+    (persp-test-clean-files "state-missing.el")))
+
+(ert-deftest state-load-missing-file-noerror-enables-mode-only ()
+  (let ((before-called nil)
+        (after-called nil))
+    (persp-mode -1)
+    (unwind-protect
+        (let ((persp-state-before-load-hook
+               (list (lambda () (setq before-called t))))
+              (persp-state-after-load-hook
+               (list (lambda () (setq after-called t)))))
+          (should-not persp-mode)
+          (should-not (persp-state-load "state-missing.el" t))
+          (should persp-mode)
+          (should (equal '("main") (persp-names)))
+          (should-not before-called)
+          (should-not after-called))
+      (persp-mode -1)
+      (persp-test-clean-files "state-missing.el"))))
+
+(ert-deftest state-load-uses-default-file-noninteractively ()
+  (unwind-protect
+      (persp-test-with-persp
+        (persp-test-with-files nil (A1)
+          (let ((persp-state-default-file "state-default.el"))
+            (persp-switch "A")
+            (persp-set-buffer A1)
+            (persp-state-save)))
+        (persp-mode -1)
+        (delete-other-windows)
+        (when (get-buffer "*scratch* (A)") (kill-buffer "*scratch* (A)"))
+        (let ((persp-state-default-file "state-default.el"))
+          (should-not (persp-state-load))
+          (should (member "A" (persp-names)))
+          (persp-switch "A")
+          (should (equal (list "A1")
+                         (sort (mapcar #'buffer-name (persp-test-buffer-list (persp-curr)))
+                               #'string-lessp)))))
+    (persp-test-clean-files "A1" "state-default.el")))
+
+(ert-deftest state-load-default-file-missing-noerror-enables-mode-only ()
+  (let ((before-called nil)
+        (after-called nil)
+        (persp-state-default-file "state-default-missing.el"))
+    (persp-mode -1)
+    (unwind-protect
+        (let ((persp-state-before-load-hook
+               (list (lambda () (setq before-called t))))
+              (persp-state-after-load-hook
+               (list (lambda () (setq after-called t)))))
+          (should-not (persp-state-load nil t))
+          (should persp-mode)
+          (should (equal '("main") (persp-names)))
+          (should-not before-called)
+          (should-not after-called))
+      (persp-mode -1)
+      (persp-test-clean-files "state-default-missing.el"))))
+
 (ert-deftest state-save-excludes-named-perspectives ()
   (unwind-protect
       (persp-test-with-persp

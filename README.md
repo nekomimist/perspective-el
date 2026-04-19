@@ -427,12 +427,23 @@ error; resave the session with a current Perspective version to migrate.
 A custom variable, `persp-state-default-file`, sets a default file to use for
 saving and restoring perspectives. When it is set, `persp-state-save` may be
 called non-interactively without an argument and it will save to the file
-referenced by that variable. This makes it easy to automatically save
-perspective sessions when Emacs exits:
+referenced by that variable. `persp-state-load` likewise falls back to that
+file when called non-interactively without a file argument. This makes it easy
+to automatically save perspective sessions when Emacs exits:
 
 ```
 (add-hook 'kill-emacs-hook #'persp-state-save)
 ```
+
+If you want startup to enable `persp-mode` even before any state file exists,
+call `persp-state-load` with a non-nil second argument:
+
+```
+(persp-state-load persp-state-default-file t)
+```
+
+In that mode, a missing file is ignored after enabling `persp-mode`, while
+unsupported or malformed state files still signal errors.
 
 A custom variable, `persp-state-excluded-perspective-names`, can omit named
 perspectives from saved state. `persp-state-save` also accepts an optional

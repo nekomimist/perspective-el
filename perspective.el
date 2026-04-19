@@ -2471,11 +2471,14 @@ visible in a perspective as windows, they will be saved as
     (run-hooks 'persp-state-after-save-hook)))
 
 ;;;###autoload
-(defun persp-state-load (file)
+(cl-defun persp-state-load (&optional file noerror)
   "Restore the perspective state saved in FILE.
 
 FILE defaults to the value of persp-state-default-file if it is
 set.
+
+When NOERROR is non-nil and FILE does not exist, enable
+`persp-mode' and return nil without signaling an error.
 
 Frames are restored, along with each frame's perspective list and merge list.
 Each perspective's buffer list and window layout are also
@@ -2487,59 +2490,71 @@ they are opened the first time each perspective is activated."
                 (read-file-name "Restore perspective state from file: "
                                 persp-state-default-file
                                 persp-state-default-file)))
-  (unless (file-exists-p file)
-    (user-error "File not found: %s" file))
-  (persp-mode 1)
-  ;; before hook
-  (run-hooks 'persp-state-before-load-hook)
-  ;; actually load
-  (let ((frame-count 0)
-        (state-complete (persp--state-read-file file))
-        (persp--state-loading-in-progress persp-state-load-lazy))
-    (cl-loop for frame in (persp--state-complete-frames state-complete) do
-             (cl-incf frame-count)
-             (let ((emacs-frame (if (> frame-count 1) (make-frame-command) (selected-frame)))
-                   (frame-persp-table (persp--state-frame-v2-persps frame))
-                   (frame-persp-order (reverse (persp--state-frame-v2-order frame)))
-                   (frame-persp-merge-list (persp--state-frame-v2-merge-list frame)))
-               (with-selected-frame emacs-frame
-                 (let ((current-name (and (persp-curr) (persp-current-name)))
-                       (last-name (and (persp-last) (persp-name (persp-last)))))
-                   (set-frame-parameter emacs-frame 'persp-merge-list frame-persp-merge-list)
-                   (set-frame-parameter emacs-frame 'persp--state-lazy-pending
-                                        (make-hash-table :test 'equal))
-                   (cl-loop for persp in frame-persp-order do
-                            (let ((state-single (gethash persp frame-persp-table)))
-                              (if persp-state-load-lazy
-                                  (progn
-                                    (persp--make-empty-persp persp)
-                                    (when state-single
-                                      (puthash persp state-single
-                                               (persp--state-lazy-pending-table))))
-                                (persp-switch persp)
-                                (set-frame-parameter nil 'persp-merge-list frame-persp-merge-list)
-                                (when state-single
-                                  (dolist (entry (persp--state-single-buffer-entries state-single))
-                                    (let ((buffer (persp--state-open-buffer-entry entry)))
-                                      (when (buffer-live-p buffer)
-                                        (persp-add-buffer buffer))))
-                                  ;; XXX: split-window-horizontally is necessary for
-                                  ;; window-state-put to succeed? Something goes haywire with root
-                                  ;; windows without it.
-                                  (split-window-horizontally)
-                                  (window-state-put (persp--state-single-windows state-single)
-                                                    (frame-root-window emacs-frame)
-                                                    'safe)))))
-                    (when persp-state-load-lazy
-                      (let ((current-persp (gethash (or current-name persp-initial-frame-name)
-                                                    (perspectives-hash)))
-                            (last-persp (and last-name
-                                             (gethash last-name (perspectives-hash)))))
-                        (set-frame-parameter nil 'persp--curr current-persp)
-                        (set-frame-parameter nil 'persp--last last-persp)
-                        (persp-update-modestring))))))))
-  ;; after hook
-  (run-hooks 'persp-state-after-load-hook))
+  (let ((target-file (if (and file (not (string-equal "" file)))
+                         (expand-file-name file)
+                       (if (and persp-state-default-file
+                                (not (string-equal "" persp-state-default-file)))
+                           (expand-file-name persp-state-default-file)
+                         nil))))
+    (unless target-file
+      (user-error "No target file specified"))
+    (unless (file-exists-p target-file)
+      (if noerror
+          (progn
+            (persp-mode 1)
+            (cl-return-from persp-state-load nil))
+        (user-error "File not found: %s" target-file)))
+    (persp-mode 1)
+    ;; before hook
+    (run-hooks 'persp-state-before-load-hook)
+    ;; actually load
+    (let ((frame-count 0)
+          (state-complete (persp--state-read-file target-file))
+          (persp--state-loading-in-progress persp-state-load-lazy))
+      (cl-loop for frame in (persp--state-complete-frames state-complete) do
+               (cl-incf frame-count)
+               (let ((emacs-frame (if (> frame-count 1) (make-frame-command) (selected-frame)))
+                     (frame-persp-table (persp--state-frame-v2-persps frame))
+                     (frame-persp-order (reverse (persp--state-frame-v2-order frame)))
+                     (frame-persp-merge-list (persp--state-frame-v2-merge-list frame)))
+                 (with-selected-frame emacs-frame
+                   (let ((current-name (and (persp-curr) (persp-current-name)))
+                         (last-name (and (persp-last) (persp-name (persp-last)))))
+                     (set-frame-parameter emacs-frame 'persp-merge-list frame-persp-merge-list)
+                     (set-frame-parameter emacs-frame 'persp--state-lazy-pending
+                                          (make-hash-table :test 'equal))
+                     (cl-loop for persp in frame-persp-order do
+                              (let ((state-single (gethash persp frame-persp-table)))
+                                (if persp-state-load-lazy
+                                    (progn
+                                      (persp--make-empty-persp persp)
+                                      (when state-single
+                                        (puthash persp state-single
+                                                 (persp--state-lazy-pending-table))))
+                                  (persp-switch persp)
+                                  (set-frame-parameter nil 'persp-merge-list frame-persp-merge-list)
+                                  (when state-single
+                                    (dolist (entry (persp--state-single-buffer-entries state-single))
+                                      (let ((buffer (persp--state-open-buffer-entry entry)))
+                                        (when (buffer-live-p buffer)
+                                          (persp-add-buffer buffer))))
+                                    ;; XXX: split-window-horizontally is necessary for
+                                    ;; window-state-put to succeed? Something goes haywire with root
+                                    ;; windows without it.
+                                    (split-window-horizontally)
+                                    (window-state-put (persp--state-single-windows state-single)
+                                                      (frame-root-window emacs-frame)
+                                                      'safe)))))
+                     (when persp-state-load-lazy
+                       (let ((current-persp (gethash (or current-name persp-initial-frame-name)
+                                                     (perspectives-hash)))
+                             (last-persp (and last-name
+                                              (gethash last-name (perspectives-hash)))))
+                         (set-frame-parameter nil 'persp--curr current-persp)
+                         (set-frame-parameter nil 'persp--last last-persp)
+                         (persp-update-modestring)))))))
+    ;; after hook
+    (run-hooks 'persp-state-after-load-hook))))
 
 (defalias 'persp-state-restore 'persp-state-load)
 
