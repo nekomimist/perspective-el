@@ -18,5 +18,9 @@ perf:
 .PHONY: compile
 compile: $(ELCFILES)
 
+.PHONY: clean
+clean:
+	rm -f $(ELCFILES)
+
 $(ELCFILES): %.elc: %.el
 	$(EMACS) --batch -Q -L . -f batch-byte-compile $<
