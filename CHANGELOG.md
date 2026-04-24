@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - `persp-switch-to-buffer-behavior`: configure whether `persp-switch-to-buffer*` imports buffers from other perspectives into the current perspective or switches to an owning perspective instead.
 - `persp-state-excluded-perspective-names`: omit exact perspective names from `persp-state-save`; merge metadata and file entries are filtered to match the saved perspectives.
+- `persp-state-save` now persists modified perspective-specific scratch buffer contents, bounded by `persp-state-scratch-buffer-size-limit`; version 3 state files remain loadable without scratch payloads.
 
 
 ## [2.21] — 2026-02-10

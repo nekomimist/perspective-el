@@ -89,6 +89,8 @@ Saved state includes:
 - perspective order
 - merge metadata
 - per-perspective window state
+- modified perspective scratch buffer contents, bounded by
+  `persp-state-scratch-buffer-size-limit`
 
 `persp-state-save` can filter out exact perspective names before writing the
 state file. That filtering happens at serialization time: excluded
@@ -98,18 +100,21 @@ list is rebuilt from the remaining serialized buffer entries.
 
 When lazy restore is enabled, saving reuses any still-deferred per-perspective
 state instead of activating those perspectives and forcing their buffers/windows
-to load. Loading follows a two-step flow in that mode: state file import first
+to load, including any saved scratch payload that still passes the current size
+limit. Loading follows a two-step flow in that mode: state file import first
 registers empty perspective stubs plus pending payload, and the first explicit
-activation of each perspective materializes its buffers and window state on
-demand. Killing a still-deferred perspective similarly operates on its pending
-state directly instead of activating it first. Shared-buffer cleanup during
-`kill-buffer` follows the same pattern: deferred perspectives are queried and
-updated in pending state without being materialized.
+activation of each perspective materializes its buffers, scratch contents, and
+window state on demand. Killing a still-deferred perspective similarly operates
+on its pending state directly instead of activating it first. Shared-buffer
+cleanup during `kill-buffer` follows the same pattern: deferred perspectives are
+queried and updated in pending state without being materialized.
 
 Transient/unpersistable window buffers are rewritten to the perspective scratch
 buffer during save-time window-state massage. The corresponding scratch buffer
 is created lazily as part of perspective materialization, not at state-load
-registration time.
+registration time. If modified scratch content was saved, that content is
+restored when the scratch buffer is materialized and the buffer is marked
+modified so a later save preserves it.
 
 ## Perspective Merging
 

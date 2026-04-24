@@ -147,6 +147,17 @@ and dired buffers only when that perspective is first activated."
   :group 'perspective-mode
   :type 'boolean)
 
+(defcustom persp-state-scratch-buffer-size-limit 65536
+  "Maximum size of modified perspective scratch buffers saved in state.
+
+When this is a non-negative integer, `persp-state-save' persists
+modified perspective-specific scratch buffer contents up to this many
+characters. Modified scratch buffers larger than this limit are not
+saved. When nil, scratch buffer content is not saved."
+  :group 'perspective-mode
+  :type '(choice (const :tag "Do not save scratch buffer content" nil)
+                 (integer :tag "Maximum characters")))
+
 (defcustom persp-suppress-no-prefix-key-warning nil
   "When non-nil, do not warn the user about `persp-mode-prefix-key' not being set."
   :group 'perspective-mode
@@ -2015,6 +2026,7 @@ PERSP-SET-IDO-BUFFERS)."
 ;;       :persps {
 ;;         "persp1" {
 ;;           :buffers [...]
+;;           :scratch-buffer-content "..."
 ;;           :windows [...]
 ;;         }
 ;;       }
@@ -2024,8 +2036,11 @@ PERSP-SET-IDO-BUFFERS)."
 ;;   ]
 ;; }
 
-(defconst persp--state-format-version 3
+(defconst persp--state-format-version 4
   "Supported on-disk format version for Perspective state files.")
+
+(defconst persp--state-legacy-format-versions '(3)
+  "On-disk format versions that can be loaded and migrated in memory.")
 
 (defvar persp--state-loading-in-progress nil
   "Non-nil while `persp-state-load' is creating perspectives.")
@@ -2054,7 +2069,51 @@ PERSP-SET-IDO-BUFFERS)."
 (cl-defstruct persp--state-single
   buffers
   buffer-entries
-  windows)
+  windows
+  scratch-buffer-content)
+
+(defun persp--state-supported-format-version-p (version)
+  "Return non-nil when VERSION can be loaded."
+  (and (integerp version)
+       (or (= persp--state-format-version version)
+           (member version persp--state-legacy-format-versions))))
+
+(defun persp--state-migrate-single (state-single)
+  "Return STATE-SINGLE as the current in-memory state shape."
+  (cond
+   ((persp--state-single-p state-single)
+    (make-persp--state-single
+     :buffers (persp--state-single-buffers state-single)
+     :buffer-entries (persp--state-single-buffer-entries state-single)
+     :windows (persp--state-single-windows state-single)
+     :scratch-buffer-content
+     (when (>= (length state-single) 5)
+       (persp--state-single-scratch-buffer-content state-single))))
+   ((and (vectorp state-single)
+         (eq (aref state-single 0) 'persp--state-single)
+         (>= (length state-single) 4))
+    (make-persp--state-single
+     :buffers (aref state-single 1)
+     :buffer-entries (aref state-single 2)
+     :windows (aref state-single 3)
+     :scratch-buffer-content (when (>= (length state-single) 5)
+                               (aref state-single 4))))
+   (t
+    (user-error "Unsupported perspective payload in state file"))))
+
+(defun persp--state-migrate-file-format (state-complete)
+  "Migrate STATE-COMPLETE to the current in-memory state format."
+  (when (= (persp--state-complete-format-version state-complete) 3)
+    (dolist (frame (persp--state-complete-frames state-complete))
+      (maphash
+       (lambda (name state-single)
+         (puthash name
+                  (persp--state-migrate-single state-single)
+                  (persp--state-frame-v2-persps frame)))
+       (persp--state-frame-v2-persps frame)))
+    (setf (persp--state-complete-format-version state-complete)
+          persp--state-format-version))
+  state-complete)
 
 (defun persp--state-read-file (file)
   "Read perspective state from FILE and validate format support."
@@ -2066,8 +2125,7 @@ PERSP-SET-IDO-BUFFERS)."
     (unless (persp--state-complete-p state-complete)
       (user-error "Invalid perspective state file: %s" file))
     (setq version (persp--state-complete-format-version state-complete))
-    (unless (and (integerp version)
-                 (= persp--state-format-version version))
+    (unless (persp--state-supported-format-version-p version)
       (user-error
        (concat
         "Unsupported perspective state format in %s. "
@@ -2076,7 +2134,7 @@ PERSP-SET-IDO-BUFFERS)."
     (unless (cl-every #'persp--state-frame-v2-p
                       (persp--state-complete-frames state-complete))
       (user-error "Unsupported frame payload in perspective state file: %s" file))
-    state-complete))
+    (persp--state-migrate-file-format state-complete)))
 
 (defun persp--state-interesting-buffer-p (buffer)
   (and (buffer-name buffer)
@@ -2107,6 +2165,47 @@ PERSP-SET-IDO-BUFFERS)."
      :kind (if (buffer-file-name buffer) 'file 'dired)
      :path (or (buffer-file-name buffer)
                (with-current-buffer buffer default-directory)))))
+
+(defun persp--state-scratch-content-in-limit-p (content)
+  "Return non-nil when CONTENT can be saved as scratch buffer content."
+  (and (stringp content)
+       (integerp persp-state-scratch-buffer-size-limit)
+       (>= persp-state-scratch-buffer-size-limit 0)
+       (<= (length content) persp-state-scratch-buffer-size-limit)))
+
+(defun persp--state-normalize-scratch-content (content)
+  "Return CONTENT if it is valid scratch payload for current settings."
+  (when (persp--state-scratch-content-in-limit-p content)
+    content))
+
+(defun persp--state-scratch-content (persp)
+  "Return serializable scratch buffer content for PERSP, or nil."
+  (let ((scratch-buffer (get-buffer (persp-scratch-buffer persp))))
+    (when (and (buffer-live-p scratch-buffer)
+               (buffer-modified-p scratch-buffer))
+      (with-current-buffer scratch-buffer
+        (persp--state-normalize-scratch-content
+         (buffer-substring-no-properties (point-min) (point-max)))))))
+
+(defun persp--state-apply-scratch-content (persp-name content)
+  "Restore CONTENT into PERSP-NAME's scratch buffer."
+  (let ((scratch-buffer (persp-get-scratch-buffer persp-name)))
+    (with-current-buffer scratch-buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert content)
+        (set-buffer-modified-p t)))
+    scratch-buffer))
+
+(defun persp--state-single-with-current-scratch-limit (state-single)
+  "Return STATE-SINGLE with scratch content filtered by current settings."
+  (make-persp--state-single
+   :buffers (persp--state-single-buffers state-single)
+   :buffer-entries (persp--state-single-buffer-entries state-single)
+   :windows (persp--state-single-windows state-single)
+   :scratch-buffer-content
+   (persp--state-normalize-scratch-content
+    (persp--state-single-scratch-buffer-content state-single))))
 
 (defun persp--state-window-state-massage (entry persp valid-buffers)
   "This is a primitive code walker. It removes references to
@@ -2187,7 +2286,10 @@ to the perspective's *scratch* buffer."
 
 If PERSP still has deferred lazy-load state pending, reuse that state
 instead of switching to the perspective and forcing it to load."
-  (or (gethash persp (frame-parameter nil 'persp--state-lazy-pending))
+  (or (let ((pending-state
+             (gethash persp (frame-parameter nil 'persp--state-lazy-pending))))
+        (when pending-state
+          (persp--state-single-with-current-scratch-limit pending-state)))
       (with-perspective persp
         (let* ((buffer-entries
                 (cl-loop for buffer in (persp-current-buffers)
@@ -2201,7 +2303,8 @@ instead of switching to the perspective and forcing it to load."
           (make-persp--state-single
            :buffers buffers
            :buffer-entries buffer-entries
-           :windows windows)))))
+           :windows windows
+           :scratch-buffer-content (persp--state-scratch-content persp))))))
 
 (defun persp--state-filtered-merge-list (merge-list excluded-names)
   "Return MERGE-LIST with entries involving EXCLUDED-NAMES removed."
@@ -2327,18 +2430,19 @@ instead of switching to the perspective and forcing it to load."
   "Return non-nil when STATE-SINGLE needs PERSP-NAME's scratch buffer."
   (let ((scratch-name (persp-scratch-buffer persp-name))
         (persisted-buffers (persp--state-single-buffers state-single)))
-    (cl-labels ((walk (entry)
-                  (cond
-                   ((not (consp entry)) nil)
-                   ((and (eq (car entry) 'buffer)
-                         (let ((buffer-name (cadr entry)))
-                           (or (equal buffer-name scratch-name)
-                               (not (member buffer-name persisted-buffers)))))
-                    t)
-                   (t
-                    (or (walk (car entry))
-                        (walk (cdr entry)))))))
-      (walk (persp--state-single-windows state-single)))))
+    (or (stringp (persp--state-single-scratch-buffer-content state-single))
+        (cl-labels ((walk (entry)
+                      (cond
+                       ((not (consp entry)) nil)
+                       ((and (eq (car entry) 'buffer)
+                             (let ((buffer-name (cadr entry)))
+                               (or (equal buffer-name scratch-name)
+                                   (not (member buffer-name persisted-buffers)))))
+                        t)
+                       (t
+                        (or (walk (car entry))
+                            (walk (cdr entry)))))))
+          (walk (persp--state-single-windows state-single))))))
 
 (defun persp--state-materialize-persp (persp-name &optional frame)
   "Load deferred state for PERSP-NAME in FRAME, if any."
@@ -2355,7 +2459,12 @@ instead of switching to the perspective and forcing it to load."
             (when (buffer-live-p buffer)
               (push buffer (persp-buffers persp)))))
         (when (persp--state-needs-scratch-p state-single persp-name)
-          (push (persp-get-scratch-buffer persp-name) (persp-buffers persp)))
+          (let ((scratch-content
+                 (persp--state-single-scratch-buffer-content state-single)))
+            (push (if (stringp scratch-content)
+                      (persp--state-apply-scratch-content persp-name scratch-content)
+                    (persp-get-scratch-buffer persp-name))
+                  (persp-buffers persp))))
         (setf (persp-buffers persp) (nreverse (delete-dups (persp-buffers persp))))
         ;; Build the window configuration without leaving behind a visible switch.
         (save-window-excursion
@@ -2405,7 +2514,9 @@ provides the default exclusion list.
 Buffers with * characters in their names, as well as buffers without
 associated files will be ignored. If such buffers are currently
 visible in a perspective as windows, they will be saved as
-'*scratch* (persp)' buffers."
+'*scratch* (persp)' buffers. Modified perspective-specific scratch
+buffers are saved when their content does not exceed
+`persp-state-scratch-buffer-size-limit'."
   (interactive (list
                 (read-file-name "Save perspective state to file: "
                                 persp-state-default-file
@@ -2538,6 +2649,11 @@ they are opened the first time each perspective is activated."
                                       (let ((buffer (persp--state-open-buffer-entry entry)))
                                         (when (buffer-live-p buffer)
                                           (persp-add-buffer buffer))))
+                                    (let ((scratch-content
+                                           (persp--state-single-scratch-buffer-content state-single)))
+                                      (when (stringp scratch-content)
+                                        (persp-add-buffer
+                                         (persp--state-apply-scratch-content persp scratch-content))))
                                     ;; XXX: split-window-horizontally is necessary for
                                     ;; window-state-put to succeed? Something goes haywire with root
                                     ;; windows without it.

@@ -2497,6 +2497,111 @@ persp-test-make-sample-environment."
         (should (persp-test-buffer-in-persps "*scratch* (A)" "A")))
     (persp-test-clean-files "state-1.el")))
 
+(ert-deftest state-save-and-load-persists-modified-scratch-buffer ()
+  (unwind-protect
+      (persp-test-with-persp
+        (let ((scratch-text "saved scratch contents"))
+          (persp-switch "A")
+          (with-current-buffer (persp-get-scratch-buffer "A")
+            (erase-buffer)
+            (insert scratch-text)
+            (set-buffer-modified-p t))
+          (persp-state-save "state-1.el")
+          (let* ((state (persp--state-read-file "state-1.el"))
+                 (frame (car (persp--state-complete-frames state)))
+                 (a-state (gethash "A" (persp--state-frame-v2-persps frame))))
+            (should (equal scratch-text
+                           (persp--state-single-scratch-buffer-content a-state))))
+          (persp-mode -1)
+          (delete-other-windows)
+          (when (get-buffer "*scratch* (A)") (kill-buffer "*scratch* (A)"))
+          (persp-mode 1)
+          (persp-state-load "state-1.el")
+          (should (gethash "A" (frame-parameter nil 'persp--state-lazy-pending)))
+          (should-not (get-buffer "*scratch* (A)"))
+          ;; Saving a still-deferred perspective must preserve the scratch payload.
+          (persp-state-save "state-2.el")
+          (persp-mode -1)
+          (delete-other-windows)
+          (when (get-buffer "*scratch* (A)") (kill-buffer "*scratch* (A)"))
+          (persp-mode 1)
+          (persp-state-load "state-2.el")
+          (should-not (get-buffer "*scratch* (A)"))
+          (persp-switch "A")
+          (with-current-buffer "*scratch* (A)"
+            (should (equal scratch-text (buffer-string)))
+            (should (buffer-modified-p)))))
+    (persp-test-clean-files "state-1.el" "state-2.el")))
+
+(ert-deftest state-load-eager-persists-modified-scratch-buffer ()
+  (let ((persp-state-load-lazy nil))
+    (unwind-protect
+        (persp-test-with-persp
+          (let ((scratch-text "eager scratch contents"))
+            (persp-switch "A")
+            (with-current-buffer (persp-get-scratch-buffer "A")
+              (erase-buffer)
+              (insert scratch-text)
+              (set-buffer-modified-p t))
+            (persp-state-save "state-eager-scratch.el")
+            (persp-mode -1)
+            (delete-other-windows)
+            (when (get-buffer "*scratch* (A)") (kill-buffer "*scratch* (A)"))
+            (persp-mode 1)
+            (persp-state-load "state-eager-scratch.el")
+            (with-current-buffer "*scratch* (A)"
+              (should (equal scratch-text (buffer-string)))
+              (should (buffer-modified-p)))))
+      (persp-test-clean-files "state-eager-scratch.el"))))
+
+(ert-deftest state-save-skips-unmodified-scratch-buffer ()
+  (unwind-protect
+      (persp-test-with-persp
+        (persp-switch "A")
+        (with-current-buffer (persp-get-scratch-buffer "A")
+          (should-not (buffer-modified-p)))
+        (persp-state-save "state-unmodified-scratch.el")
+        (let* ((state (persp--state-read-file "state-unmodified-scratch.el"))
+               (frame (car (persp--state-complete-frames state)))
+               (a-state (gethash "A" (persp--state-frame-v2-persps frame))))
+          (should-not (persp--state-single-scratch-buffer-content a-state))))
+    (persp-test-clean-files "state-unmodified-scratch.el")))
+
+(ert-deftest state-save-and-load-persists-empty-modified-scratch-buffer ()
+  (unwind-protect
+      (persp-test-with-persp
+        (persp-switch "A")
+        (with-current-buffer (persp-get-scratch-buffer "A")
+          (erase-buffer)
+          (set-buffer-modified-p t))
+        (persp-state-save "state-empty-scratch.el")
+        (persp-mode -1)
+        (delete-other-windows)
+        (when (get-buffer "*scratch* (A)") (kill-buffer "*scratch* (A)"))
+        (persp-mode 1)
+        (persp-state-load "state-empty-scratch.el")
+        (persp-switch "A")
+        (with-current-buffer "*scratch* (A)"
+          (should (equal "" (buffer-string)))
+          (should (buffer-modified-p))))
+    (persp-test-clean-files "state-empty-scratch.el")))
+
+(ert-deftest state-save-skips-oversized-scratch-buffer ()
+  (let ((persp-state-scratch-buffer-size-limit 5))
+    (unwind-protect
+        (persp-test-with-persp
+          (persp-switch "A")
+          (with-current-buffer (persp-get-scratch-buffer "A")
+            (erase-buffer)
+            (insert "123456")
+            (set-buffer-modified-p t))
+          (persp-state-save "state-large-scratch.el")
+          (let* ((state (persp--state-read-file "state-large-scratch.el"))
+                 (frame (car (persp--state-complete-frames state)))
+                 (a-state (gethash "A" (persp--state-frame-v2-persps frame))))
+            (should-not (persp--state-single-scratch-buffer-content a-state))))
+      (persp-test-clean-files "state-large-scratch.el"))))
+
 (ert-deftest state-kill-buffer-does-not-load-lazy-perspective ()
   (unwind-protect
       (persp-test-with-persp
@@ -2633,6 +2738,38 @@ persp-test-make-sample-environment."
           (should-not after-called))
       (persp-mode -1)
       (persp-test-clean-files "state-default-missing.el"))))
+
+(ert-deftest state-load-format-v3-loads-without-scratch-payload ()
+  (unwind-protect
+      (persp-test-with-persp
+        (persp-switch "A")
+        (persp-state-save "state-v3.el")
+        (let* ((state (persp--state-read-file "state-v3.el"))
+               (frame (car (persp--state-complete-frames state)))
+               (persps (persp--state-frame-v2-persps frame))
+               (a-state (gethash "A" persps)))
+          (setf (persp--state-complete-format-version state) 3)
+          (puthash "A"
+                   (vector 'persp--state-single
+                           (persp--state-single-buffers a-state)
+                           (persp--state-single-buffer-entries a-state)
+                           (persp--state-single-windows a-state))
+                   persps)
+          (with-temp-file "state-v3.el"
+            (prin1 state (current-buffer))))
+        (persp-mode -1)
+        (delete-other-windows)
+        (persp-mode 1)
+        (persp-state-load "state-v3.el")
+        (let* ((state (persp--state-read-file "state-v3.el"))
+               (frame (car (persp--state-complete-frames state)))
+               (a-state (gethash "A" (persp--state-frame-v2-persps frame))))
+          (should-not (persp--state-single-scratch-buffer-content a-state)))
+        (persp-switch "A")
+        (should (member "A" (persp-names)))
+         (with-current-buffer "*scratch* (A)"
+           (should-not (buffer-modified-p))))
+     (persp-test-clean-files "state-v3.el")))
 
 (ert-deftest state-save-excludes-named-perspectives ()
   (unwind-protect

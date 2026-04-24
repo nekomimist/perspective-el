@@ -419,10 +419,16 @@ related operations such as `vc-follow-link` also update deferred perspectives
 without forcing them to materialize. Perspective
 scratch buffers are also created on demand: a deferred perspective only gets a
 `*scratch* (NAME)` buffer when it is materialized and its saved window state
-actually needs one.
+actually needs one, or when saved scratch contents need to be restored.
 
-State files are versioned. Loading unsupported legacy formats now raises an
-error; resave the session with a current Perspective version to migrate.
+Modified perspective-specific scratch buffers are saved in the same state file
+when their contents do not exceed `persp-state-scratch-buffer-size-limit`
+characters. Unmodified scratch buffers are not saved, and oversized scratch
+buffers are skipped rather than truncated.
+
+State files are versioned. Loading unsupported legacy formats raises an error;
+version 3 state files are still accepted and loaded without scratch-buffer
+contents. Resave the session with a current Perspective version to migrate.
 
 A custom variable, `persp-state-default-file`, sets a default file to use for
 saving and restoring perspectives. When it is set, `persp-state-save` may be
@@ -488,6 +494,9 @@ customize`). The following are likely to be of most interest:
   loading Perspective state.
 - `persp-state-excluded-perspective-names`: Omits exact perspective names from
   `persp-state-save` output.
+- `persp-state-scratch-buffer-size-limit`: Sets the maximum number of
+  characters saved from each modified perspective scratch buffer. Set it to nil
+  to disable saving scratch buffer contents.
 - `persp-show-modestring`: Determines if Perspective should show its status in
   the modeline. It defaults to `t`, but can also be `nil` (turning off the
   modeline status display) or `'header` (which uses the header line instead of
